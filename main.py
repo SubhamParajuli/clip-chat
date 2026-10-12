@@ -1,35 +1,27 @@
 import asyncio
 import sys
-from langchain_core.messages import HumanMessage
-from src.agent import async_app
-from src.evaluate import run_evaluation  # Can be wrapped or updated for async
+from src.agent import query_video_agent_programmatic
+from src.evaluate import run_evaluation
 from src.ingest import ingest_video
 
 
 def print_help():
-  print("=" * 50)
-  print(" Multi-Modal Agentic Video System - CLI Help ")
-  print("=" * 50)
-  print("Usage:")
-  print("  python main.py ingest <video_path> <video_id>")
-  print('  python main.py query "Your natural language question here"')
-  print("  python main.py eval")
-  print("=" * 50)
-
-
-async def handle_query(query_text: str):
-  """Asynchronously streams the LangGraph agent's reasoning and tool calls."""
-  print(f"\nQuerying video system for: '{query_text}'\n" + "-" * 40)
-  inputs = {"messages": [HumanMessage(content=query_text)]}
-
-  try:
-    # Use .astream() for non-blocking asynchronous execution
-    async for chunk in async_app.astream(inputs, stream_mode="values"):
-      latest_message = chunk["messages"][-1]
-      latest_message.pretty_print()
-  except Exception as e:
-    print(f"Error during agent execution: {str(e)}")
-  print("-" * 40)
+  print("=" * 60)
+  print(" Multi-Modal Agentic Video System - CLI Runner ")
+  print("=" * 60)
+  print("Commands:")
+  print("  1. Ingest Video:")
+  print("     python main.py ingest <video_path> <video_id>")
+  print("     Example: python main.py ingest data/sample.mp4 vid_01")
+  print("\n  2. Query Agent & Generate Clip:")
+  print('     python main.py query "Your natural language question"')
+  print(
+      '     Example: python main.py query "When does the red car with number'
+      ' 1234 appear?"'
+  )
+  print("\n  3. Run Evaluation:")
+  print("     python main.py eval")
+  print("=" * 60)
 
 
 async def main():
@@ -47,12 +39,11 @@ async def main():
 
     video_path = sys.argv[2]
     video_id = sys.argv[3]
-    print(f"Starting ingestion process for {video_id} ({video_path})...")
+    print(f"Starting optimized ingestion for video: {video_id} ({video_path})")
 
-    # Ingestion is heavy CPU bound (Whisper/OCR/CLIP). 
-    # Run it in a thread executor to keep the async event loop unblocked if needed.
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, ingest_video, video_path, video_id)
+    print("Ingestion complete and saved to local ChromaDB!")
 
   elif command == "query":
     if len(sys.argv) < 3:
@@ -61,10 +52,27 @@ async def main():
       sys.exit(1)
 
     query_text = " ".join(sys.argv[2:])
-    await handle_query(query_text)
+    print(f"\nQuerying agent for: '{query_text}'...\n" + "-" * 50)
+
+    # Run the agent programmatically; returns a validated Pydantic model with clip_path
+    result = await query_video_agent_programmatic(query_text)
+
+    print("=" * 20 + " STRUCTURED AGENT RESULT " + "=" * 20)
+    print(f"Video ID   : {result.video_id}")
+    print(f"Start Time : {result.start_time}s")
+    print(f"End Time   : {result.end_time}s")
+    print(f"Reasoning  : {result.reasoning}")
+    if result.clip_path:
+      print(f"Saved Clip : {result.clip_path} (Ready for playback!)")
+    else:
+      print(
+          "Saved Clip : [Warning] Could not generate clip (Check if source"
+          " video exists in ./data/)"
+      )
+    print("=" * 65)
 
   elif command == "eval":
-    print("Running evaluation pipeline...")
+    print("Running system evaluation pipeline...")
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, run_evaluation)
 
@@ -73,5 +81,4 @@ async def main():
 
 
 if __name__ == "__main__":
-  # Run the async main event loop
   asyncio.run(main())
