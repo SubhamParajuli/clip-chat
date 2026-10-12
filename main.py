@@ -80,9 +80,9 @@ async def main():
 
   elif command == "eval":
     print("Running system evaluation pipeline...")
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, run_evaluation)
+    from src.evaluate import run_evaluation
 
+    await run_evaluation()
   elif command == "ingest":
     if len(sys.argv) < 3:
         print("Error: Ingest requires a video path or YouTube URL.")

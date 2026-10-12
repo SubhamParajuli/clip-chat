@@ -1,80 +1,113 @@
+import asyncio
 import json
 import os
-import re
-from langchain_core.messages import HumanMessage
-from src.agent import async_app
+from src.agent import query_video_agent_programmatic
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
-def extract_timestamp_from_text(text: str) -> float | None:
-  """Helper regex to pull the first timestamp float found in the agent's response."""
-  match = re.search(r"Timestamp:\s*([\d.]+)", text)
-  if match:
-    return float(match.group(1))
-  return None
-
-
-def run_evaluation(dataset_path: str = "eval_dataset.json", time_tolerance: float = 5.0):
+async def run_evaluation(
+    dataset_path: str = "eval_dataset.json", time_tolerance: float = 5.0
+):
   if not os.path.exists(dataset_path):
     logger.error("Evaluation dataset '%s' not found.", dataset_path)
+    print(f"Error: Evaluation dataset '{dataset_path}' not found.")
     return
 
   with open(dataset_path, "r") as f:
     test_cases = json.load(f)
 
   total_cases = len(test_cases)
-  hit_count = 0
-  temporal_passed = 0
+  match_correct_count = 0
+  temporal_passed_count = 0
+  negative_passed_count = 0
+  negative_total = 0
 
-  print(f"Starting Evaluation across {total_cases} test cases...\n" + "-" * 50)
+  print(
+      f"Starting Evaluation across {total_cases} test cases...\n" + "-" * 50
+  )
 
   for i, test in enumerate(test_cases, 1):
     query = test["query"]
     exp_video = test["expected_video_id"]
     exp_start = test["expected_start"]
+    should_exist = test["should_exist"]
 
     print(f"Test [{i}/{total_cases}] Query: '{query}'")
 
-    # Invoke the LangGraph agent app
-    inputs = {"messages": [HumanMessage(content=query)]}
     try:
-      final_state = async_app.invoke(inputs)
-      agent_response = final_state["messages"][-1].content
+      # Invoke the production programmatic agent wrapper
+      result = await query_video_agent_programmatic(query)
     except Exception as e:
       logger.exception("Evaluation agent execution failed for test %d.", i)
       print(f"  [FAIL] Agent execution error: {str(e)}")
       continue
 
-    # 1. Check Retrieval Hit (Does response mention the correct video ID?)
-    video_hit = exp_video in agent_response
-
-    # 2. Check Temporal Accuracy (Is predicted timestamp within tolerance?)
-    predicted_time = extract_timestamp_from_text(agent_response)
-    time_hit = False
-
-    if predicted_time is not None:
-      time_diff = abs(predicted_time - exp_start)
-      if time_diff <= time_tolerance:
-        time_hit = True
-        temporal_passed += 1
-        print(f"  [PASS] Predicted time {predicted_time}s is within {time_tolerance}s of expected {exp_start}s.")
+    # Case A: Negative / Hallucination Test (Content should NOT exist)
+    if not should_exist:
+      negative_total += 1
+      if not result.found_match:
+        negative_passed_count += 1
+        print("  [PASS] Successfully rejected non-existent content (Guardrail active).")
       else:
-        print(f"  [FAIL] Time mismatch. Predicted: {predicted_time}s, Expected: {exp_start}s (Diff: {time_diff:.1f}s)")
-    else:
-      print(f"  [FAIL] Could not parse timestamp from agent response: '{agent_response}'")
+        print(
+            f"  [FAIL] False positive! Agent claimed a match for non-existent query. Reasoning: {result.reasoning}"
+        )
+      print("-" * 50)
+      continue
 
-    if video_hit and time_hit:
-      hit_count += 1
+    # Case B: Positive Match Test (Content SHOULD exist)
+    video_hit = result.found_match and (result.video_id == exp_video or not exp_video)
+    
+    if video_hit:
+      match_correct_count += 1
+      print(f"  [PASS] Correctly matched Video ID: {result.video_id}")
+    else:
+      print(
+          f"  [FAIL] Video match failed. Expected ID: {exp_video}, Got ID: {result.video_id}, Found Match: {result.found_match}"
+      )
+
+    # Check Temporal Accuracy
+    time_diff = abs(result.start_time - exp_start)
+    if result.found_match and time_diff <= time_tolerance:
+      temporal_passed_count += 1
+      print(
+          f"  [PASS] Start time {result.start_time}s is within {time_tolerance}s of expected {exp_start}s."
+      )
+    elif result.found_match:
+      print(
+          f"  [FAIL] Time mismatch. Predicted: {result.start_time}s, Expected: {exp_start}s (Diff: {time_diff:.1f}s)"
+      )
+    else:
+      print("  [FAIL] Skipped temporal check because agent set found_match to False.")
+
     print("-" * 50)
 
   # Final Summary Metrics Report
-  hit_rate = (hit_count / total_cases) * 100
-  temporal_accuracy = (temporal_passed / total_cases) * 100
+  positive_total = total_cases - negative_total
+  retrieval_accuracy = (match_correct_count / positive_total * 100) if positive_total > 0 else 0
+  temporal_accuracy = (temporal_passed_count / positive_total * 100) if positive_total > 0 else 0
+  guardrail_accuracy = (negative_passed_count / negative_total * 100) if negative_total > 0 else 100
 
   print("\n" + "=" * 20 + " EVALUATION REPORT " + "=" * 20)
-  print(f"Total Test Cases Evaluated : {total_cases}")
-  print(f"Overall Success Rate       : {hit_rate:.1f}%")
-  print(f"Temporal Accuracy (±{time_tolerance}s): {temporal_accuracy:.1f}%")
+  print(f"Total Test Cases Evaluated   : {total_cases}")
+  print(f"Positive Match Accuracy      : {retrieval_accuracy:.1f}%")
+  print(f"Temporal Accuracy (±{time_tolerance}s) : {temporal_accuracy:.1f}%")
+  print(f"Guardrail / Hallucination Rejection : {guardrail_accuracy:.1f}%")
   print("=" * 59)
+
+
+import asyncio
+import sys
+
+if __name__ == "__main__":
+  if len(sys.argv) > 1 and sys.argv[1] == "eval":
+    from evaluate import run_evaluation
+
+    # Correctly run the async evaluation coroutine
+    asyncio.run(run_evaluation())
+  else:
+    import uvicorn
+
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

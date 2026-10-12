@@ -155,17 +155,24 @@ def slice_video_segment(video_id: str, start_time: float, end_time: float) -> st
     # Enforce absolute path to prevent static file mounting or rendering issues
     output_path = os.path.abspath(os.path.join("./data", output_clip_name))
 
+    # Calculate duration instead of using absolute -to end time
+    duration = buffered_end - buffered_start
+
     command = [
         "ffmpeg",
         "-y",
         "-ss",
-        str(buffered_start),
-        "-to",
-        str(buffered_end),
+        str(buffered_start),  # Input seeking (fast)
         "-i",
         source_path,
-        "-c",
-        "copy",
+        "-t",
+        str(duration),        # Duration of the clip
+        "-c:v",
+        "copy",               # Copy video stream without re-encoding (keeps it fast)
+        "-c:a",
+        "aac",                # Re-encode audio to AAC to ensure audio is never dropped
+        "-strict",
+        "experimental",
         output_path,
     ]
 
@@ -173,7 +180,7 @@ def slice_video_segment(video_id: str, start_time: float, end_time: float) -> st
         subprocess.run(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
         )
-        logger.info("Successfully generated clip at: %s", output_path)
+        logger.info("Successfully generated clip with audio at: %s", output_path)
         return output_path
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode("utf-8", errors="ignore")
