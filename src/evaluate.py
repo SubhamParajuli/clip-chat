@@ -2,7 +2,7 @@ import json
 import os
 import re
 from langchain_core.messages import HumanMessage
-from src.agent import app
+from src.agent import async_app
 
 
 def extract_timestamp_from_text(text: str) -> float | None:
@@ -37,7 +37,7 @@ def run_evaluation(dataset_path: str = "eval_dataset.json", time_tolerance: floa
     # Invoke the LangGraph agent app
     inputs = {"messages": [HumanMessage(content=query)]}
     try:
-      final_state = app.invoke(inputs)
+      final_state = async_app.invoke(inputs)
       agent_response = final_state["messages"][-1].content
     except Exception as e:
       print(f"  [FAIL] Agent execution error: {str(e)}")

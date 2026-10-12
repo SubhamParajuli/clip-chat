@@ -7,12 +7,15 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
-from src.db_client import get_chroma_client, get_video_collection
+from src.db_client import get_chroma_client, get_audio_collection,get_visual_collection
+import torch
 
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using compute device: {DEVICE}")
 # Global models
-text_embedder = SentenceTransformer("all-MiniLM-L6-v2")
-clip_model = SentenceTransformer("clip-ViT-B-32")
-collection = get_video_collection(get_chroma_client())
+text_embedder = SentenceTransformer("all-MiniLM-L6-v2",device=DEVICE)
+clip_model = SentenceTransformer("clip-ViT-B-32",device=DEVICE)
+
 
 
 # 1. Enhanced Pydantic Schema including clip path output
@@ -33,35 +36,71 @@ class VideoSearchResponse(BaseModel):
       default="", description="The local file path of the generated video clip."
   )
 
-
 @tool
-def search_video_database(query: str) -> str:
-  """Searches the multi-modal video database for visual descriptions or dialogue."""
-  query_vector = clip_model.encode(query).tolist()
-  results = collection.query(query_embeddings=[query_vector], n_results=3)
+def search_video_database(query: str,target_video_id: str = None) -> str:
+  """Searches both audio transcripts and visual frame collections for matches."""
+  client = get_chroma_client()
+  audio_col = get_audio_collection(client)
+  visual_col = get_visual_collection(client)
+  where_filter = {"video_id": target_video_id} if target_video_id else None
 
-  if not results["documents"][0]:
-    return "No matching timestamps found in the video database."
+  # Query audio collection (uses 384-dim text embedder)
+  audio_vector = text_embedder.encode(query).tolist()
+  audio_results = audio_col.query(query_embeddings=[audio_vector], n_results=2)
+
+  # Query visual collection (uses 512-dim CLIP model for text-to-image semantic matching)
+  visual_vector = clip_model.encode(query).tolist()
+  visual_results = visual_col.query(
+      query_embeddings=[visual_vector], n_results=2,where=where_filter
+  )
 
   formatted_output = []
-  for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-    formatted_output.append(
-        f"- Video: {meta['video_id']} | Type: {meta['type'].upper()} | "
-        f"Timestamp: {meta['start_time']}s - {meta['end_time']}s | Details: {doc}"
-    )
+
+  if audio_results["documents"] and audio_results["documents"][0]:
+    for doc, meta in zip(
+        audio_results["documents"][0], audio_results["metadatas"][0]
+    ):
+      formatted_output.append(
+          f"- Video: {meta['video_id']} | Type: AUDIO | "
+          f"Timestamp: {meta['start_time']}s - {meta['end_time']}s | Speech:"
+          f" {doc}"
+      )
+
+  if visual_results["documents"] and visual_results["documents"][0]:
+    for doc, meta in zip(
+        visual_results["documents"][0], visual_results["metadatas"][0]
+    ):
+      formatted_output.append(
+          f"- Video: {meta['video_id']} | Type: VISUAL | "
+          f"Timestamp: {meta['start_time']}s - {meta['end_time']}s | Details:"
+          f" {doc}"
+      )
+
+  if not formatted_output:
+    return "No matching timestamps found in the video database."
+
   return "\n".join(formatted_output)
 
-
 tools = [search_video_database]
-llm = ChatOllama(model="llama3", temperature=0)
+llm = ChatOllama(model="llama3.1:8b", temperature=0)
 llm_with_tools = llm.bind_tools(tools)
 structured_llm = llm.with_structured_output(VideoSearchResponse)
 
 
 # 2. Helper FFmpeg Slicing Function
 def slice_video_segment(video_id: str, start_time: float, end_time: float) -> str:
-  """Unconditionally slices the source video file using FFmpeg and returns the clip path."""
-  # Locate source video in the data folder (supports standard formats like .mp4)
+  """Unconditionally slices the source video file using FFmpeg
+
+  with a natural buffer window for better context.
+  """
+  # --- 2nd IMPROVEMENT: SMART CLIP PADDING ---
+  # Add a 2-second buffer before and after the match
+  # max(0.0, ...) ensures the start time never goes below 0 seconds
+  buffered_start = max(0.0, start_time - 2.0)
+  buffered_end = end_time + 2.0
+  # -------------------------------------------
+
+  # Locate source video file in the data folder
   source_path = None
   for ext in [".mp4", ".mkv", ".mov"]:
     candidate = os.path.join("./data", f"{video_id}{ext}")
@@ -72,17 +111,17 @@ def slice_video_segment(video_id: str, start_time: float, end_time: float) -> st
   if not source_path:
     return ""  # Source video file not found locally
 
-  output_clip_name = f"{video_id}_clip_{int(start_time)}_{int(end_time)}.mp4"
+  output_clip_name = f"{video_id}_clip_{int(buffered_start)}_{int(buffered_end)}.mp4"
   output_path = os.path.join("./data", output_clip_name)
 
-  # FFmpeg command for precise, fast stream copying
+  # FFmpeg command using the buffered start and end times
   command = [
       "ffmpeg",
       "-y",
       "-ss",
-      str(start_time),
+      str(buffered_start),
       "-to",
-      str(end_time),
+      str(buffered_end),
       "-i",
       source_path,
       "-c",
@@ -97,7 +136,6 @@ def slice_video_segment(video_id: str, start_time: float, end_time: float) -> st
     return output_path
   except subprocess.CalledProcessError:
     return ""
-
 
 # 3. LangGraph Nodes
 async def call_model(state: MessagesState):

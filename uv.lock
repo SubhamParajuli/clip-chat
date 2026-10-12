@@ -573,7 +573,7 @@ requires-dist = [
     { name = "sentence-transformers", specifier = ">=3.0.0" },
     { name = "torch", specifier = ">=2.0.0" },
     { name = "torchvision", specifier = ">=0.15.0" },
-    { name = "yt-dlp", specifier = ">=2026.8.19" },
+    { name = "yt-dlp", specifier = ">=2023.12.30" },
 ]
 
 [[package]]

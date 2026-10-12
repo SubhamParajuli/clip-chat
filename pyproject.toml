@@ -19,5 +19,5 @@ dependencies = [
     "sentence-transformers>=3.0.0",
     "torch>=2.0.0",
     "torchvision>=0.15.0",
-    "yt-dlp>=2026.8.19",
+    "yt-dlp>=2023.12.30",
 ]

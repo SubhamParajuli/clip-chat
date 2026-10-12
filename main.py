@@ -3,6 +3,7 @@ import sys
 from src.agent import query_video_agent_programmatic
 from src.evaluate import run_evaluation
 from src.ingest import ingest_video
+from src.ingest import ingest_from_source
 
 
 def print_help():
@@ -32,18 +33,24 @@ async def main():
   command = sys.argv[1].lower()
 
   if command == "ingest":
-    if len(sys.argv) != 4:
-      print("Error: Ingest requires a video path and a video ID.")
-      print("Example: python main.py ingest data/sample.mp4 vid_01")
-      sys.exit(1)
+    if len(sys.argv) < 3:
+            print("Error: Ingest requires a video path or YouTube URL.")
+            print("Usage:")
+            print("  Local file: python main.py ingest data/sample.mp4 [optional_id]")
+            print("  YouTube URL: python main.py ingest https://www.youtube.com/watch?v=XYZ123")
+            sys.exit(1)
 
-    video_path = sys.argv[2]
-    video_id = sys.argv[3]
-    print(f"Starting optimized ingestion for video: {video_id} ({video_path})")
+    source = sys.argv[2]
+        # Use provided video ID, or pass None so ingest_from_source auto-generates it
+    video_id = sys.argv[3] if len(sys.argv) >= 4 else None
+
+    print(f"Starting ingestion process for source: {source}...")
 
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, ingest_video, video_path, video_id)
-    print("Ingestion complete and saved to local ChromaDB!")
+        # Call ingest_from_source instead of ingest_video directly
+    final_id = await asyncio.to_thread(ingest_from_source, source, video_id)
+    print(f"Successfully ingested and indexed video with ID: '{final_id}'!")
+
 
   elif command == "query":
     if len(sys.argv) < 3:
@@ -75,6 +82,25 @@ async def main():
     print("Running system evaluation pipeline...")
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, run_evaluation)
+
+  elif command == "ingest":
+    if len(sys.argv) < 3:
+        print("Error: Ingest requires a video path or YouTube URL.")
+        print("Example 1: python main.py ingest data/sample.mp4 vid_01")
+        print("Example 2: python main.py ingest https://www.youtube.com/watch?v=XYZ123")
+        sys.exit(1)
+
+        source = sys.argv[2]
+        # Optional explicit video id if provided as 3rd arg
+        vid_id = sys.argv[3] if len(sys.argv) == 4 else None
+
+        print(f"Starting ingestion pipeline for source: {source}")
+        loop = asyncio.get_running_loop()
+        
+        # Run the wrapper that handles both local files and YouTube downloads
+        final_vid_id = await loop.run_in_executor(None, ingest_from_source, source, vid_id)
+        print(f"Successfully ingested and indexed video ID: {final_vid_id}!")
+
 
   else:
     print_help()
