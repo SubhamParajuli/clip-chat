@@ -1,18 +1,32 @@
+import hashlib
 import os
 import cv2
 import easyocr
-import whisper
 from sentence_transformers import SentenceTransformer
-from yt_dlp import YoutubeDL
+import torch
+import whisper
 from src.db_client import (
     get_audio_collection,
     get_chroma_client,
     get_visual_collection,
 )
-import torch
+from yt_dlp import YoutubeDL
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using compute device: {DEVICE}")
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+
+def compute_file_hash(file_path: str) -> str:
+  """Computes an MD5 hash of a local file in chunks for quick,
+
+  deterministic identification (rename-resilient).
+  """
+  hasher = hashlib.md5()
+  with open(file_path, "rb") as f:
+    for chunk in iter(lambda: f.read(4096 * 1024), b""):
+      hasher.update(chunk)
+  return f"vid_{hasher.hexdigest()[:12]}"
 
 
 def ingest_video(
@@ -20,22 +34,32 @@ def ingest_video(
 ):
   if not os.path.exists(video_path):
     raise FileNotFoundError(f"Video file not found: {video_path}")
-  existing = audio_col.get(where={"video_id": video_id}, limit=1)
-
-  print(f"Starting optimized multi-modal ingestion for: {video_id}...")
-  whisper_model = whisper.load_model("base",device=DEVICE)
-  clip_model = SentenceTransformer("clip-ViT-B-32",device=DEVICE)
-  text_embedder = SentenceTransformer("all-MiniLM-L6-v2",device=DEVICE)
-  ocr_reader = easyocr.Reader(["en"],gpu=True)
 
   client = get_chroma_client()
   audio_col = get_audio_collection(client)
   visual_col = get_visual_collection(client)
-  if existing["ids"]:
-    print(f"Video '{video_id}' is already ingested. Skipping.")
+
+  # --- 1. CACHING & IDEMPOTENCY CHECK ---
+  # If this video_id already exists in ChromaDB, skip encoding entirely!
+  existing = audio_col.get(where={"video_id": video_id}, limit=1)
+  if existing and existing.get("ids"):
+    logger.info(
+        "Cache hit for video ID %s; skipping redundant AI encoding.",
+        video_id,
+    )
     return
-  # 1. INGEST AUDIO TRACK (384-dim)
-  print("Transcribing audio...")
+  # -------------------------------------
+
+  logger.info("Cache miss; starting multi-modal ingestion for %s.", video_id)
+
+  # Load models onto GPU if available
+  device = "cuda" if torch.cuda.is_available() else "cpu"
+  whisper_model = whisper.load_model("base", device=device)
+  clip_model = SentenceTransformer("clip-ViT-B-32", device=device)
+  text_embedder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+  ocr_reader = easyocr.Reader(["en"], gpu=(device == "cuda"))
+
+  # 2. INGEST AUDIO TRACK
   audio_result = whisper_model.transcribe(video_path)
   audio_points = 0
   for i, seg in enumerate(audio_result.get("segments", [])):
@@ -50,33 +74,29 @@ def ingest_video(
         documents=[text],
         metadatas=[{
             "video_id": video_id,
+            "file_path":video_path,
             "type": "audio",
             "start_time": float(seg["start"]),
             "end_time": float(seg["end"]),
         }],
     )
     audio_points += 1
-  print(f"Saved {audio_points} audio chunks.")
+  logger.info("Saved %d audio chunks.", audio_points)
 
-  # 2. OPTIMIZED VISUAL INGESTION (Resized frames + Scene-Change + Fast OCR)
-  print(
-      "Processing visual frames with scene-change filtering & downscaling..."
-  )
+  # 3. INGEST VISUAL FRAMES
   cap = cv2.VideoCapture(video_path)
   fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
   success, prev_frame = cap.read()
   if not success:
-    print("Error reading video frames.")
     cap.release()
+    logger.error("Unable to read video frames from %s.", video_path)
     return
 
-  # Resize previous frame reference for fast diff calculation
   prev_frame = cv2.resize(prev_frame, (640, 360))
-
   frame_count = 0
   saved_frames = 0
-  skip_interval = int(fps)  # Sample roughly 1 frame per second by default
+  skip_interval = int(fps)
 
   while success:
     success, frame = cap.read()
@@ -84,30 +104,22 @@ def ingest_video(
       break
 
     frame_count += 1
-
-    # Skip frames to target ~1 frame per second check unless heavy motion occurs
     if frame_count % skip_interval != 0:
       continue
 
     timestamp = frame_count / fps
-
-    # Downscale frame to 640x360 for lightning-fast CPU inference
     small_frame = cv2.resize(frame, (640, 360))
 
-    # Fast pixel difference check
     diff = cv2.absdiff(small_frame, prev_frame)
     gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
     non_zero_count = cv2.countNonZero(gray_diff)
     total_pixels = small_frame.shape[0] * small_frame.shape[1]
     change_ratio = non_zero_count / total_pixels
 
-    # If change is minor, skip heavy OCR and CLIP embedding
     if change_ratio < similarity_threshold:
       continue
 
     prev_frame = small_frame
-
-    # Run EasyOCR and CLIP on the downscaled frame (much faster on CPU)
     ocr_results = ocr_reader.readtext(small_frame, detail=0)
     ocr_text = " ".join(ocr_results).strip()
 
@@ -119,6 +131,7 @@ def ingest_video(
     metadata = {
         "video_id": video_id,
         "type": "visual",
+        "file_path":video_path,
         "start_time": float(timestamp),
         "end_time": float(timestamp + 1.0),
     }
@@ -134,19 +147,22 @@ def ingest_video(
     saved_frames += 1
 
   cap.release()
-  print(
-      f"Ingestion Complete! Saved {saved_frames} key visual frames out of"
-      f" {frame_count} total frames."
+  logger.info(
+      "Ingestion complete. Saved %d key visual frames out of %d total frames.",
+      saved_frames,
+      frame_count,
   )
 
 
 def ingest_from_source(source: str, video_id: str = None) -> str:
+  """Handles YouTube URLs or Local Paths, ensuring deterministic ID generation."""
   target_path = source
   resolved_video_id = video_id
 
+  # Handle YouTube URLs
   if "youtube.com" in source or "youtu.be" in source:
-    print(f"Detected YouTube link. Downloading via yt-dlp: {source}")
-    output_dir = "data"
+    logger.info("Downloading YouTube video: %s", source)
+    output_dir = "./data"
     os.makedirs(output_dir, exist_ok=True)
 
     ydl_opts = {
@@ -163,11 +179,18 @@ def ingest_from_source(source: str, video_id: str = None) -> str:
         base, _ = os.path.splitext(target_path)
         if os.path.exists(base + ".mp4"):
           target_path = base + ".mp4"
-      if not resolved_video_id:
-        resolved_video_id = info.get("id")
 
-  if not resolved_video_id:
-    resolved_video_id = os.path.splitext(os.path.basename(target_path))[0]
+      if not resolved_video_id:
+        resolved_video_id = f"yt_{info.get('id')}"
+
+  # Handle Local Files / Direct Uploads
+  else:
+    if not os.path.exists(target_path):
+      raise FileNotFoundError(f"Source file not found: {target_path}")
+
+    # If no ID is provided, hash the file content to make it unique yet deterministic
+    if not resolved_video_id:
+      resolved_video_id = compute_file_hash(target_path)
 
   ingest_video(target_path, resolved_video_id)
   return resolved_video_id

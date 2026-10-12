@@ -8,10 +8,13 @@ from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 from src.db_client import get_chroma_client, get_audio_collection,get_visual_collection
+from src.logging_config import get_logger
 import torch
 
+logger = get_logger(__name__)
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using compute device: {DEVICE}")
+logger.info("Using compute device: %s", DEVICE)
 # Global models
 text_embedder = SentenceTransformer("all-MiniLM-L6-v2",device=DEVICE)
 clip_model = SentenceTransformer("clip-ViT-B-32",device=DEVICE)
@@ -20,20 +23,31 @@ clip_model = SentenceTransformer("clip-ViT-B-32",device=DEVICE)
 
 # 1. Enhanced Pydantic Schema including clip path output
 class VideoSearchResponse(BaseModel):
+  found_match: bool = Field(
+      description=(
+          "Set to True ONLY if the search results genuinely contain the"
+          " requested content. Set to False if the content is missing or"
+          " irrelevant."
+      )
+  )
   video_id: str = Field(
-      description="The ID of the video where the event occurred."
+      default="", description="The video ID where the match was found."
   )
   start_time: float = Field(
-      description="The exact start timestamp in seconds of the matching event."
+      default=0.0, description="Start time of the clip in seconds."
   )
   end_time: float = Field(
-      description="The exact end timestamp in seconds of the matching event."
+      default=0.0, description="End time of the clip in seconds."
   )
   reasoning: str = Field(
-      description="Explanation of why this timestamp matches the user query."
+      description=(
+          "Explain why this timestamp matches, or explain clearly why no match"
+          " was found in the video."
+      )
   )
   clip_path: str = Field(
-      default="", description="The local file path of the generated video clip."
+      default="",
+      description="Path to the sliced clip file, or empty string if no match.",
   )
 
 @tool
@@ -89,32 +103,52 @@ structured_llm = llm.with_structured_output(VideoSearchResponse)
 
 # 2. Helper FFmpeg Slicing Function
 def slice_video_segment(video_id: str, start_time: float, end_time: float) -> str:
-  """Unconditionally slices the source video file using FFmpeg
+  """Slices the source video file using FFmpeg by querying the exact file path
 
-  with a natural buffer window for better context.
+  stored in ChromaDB metadata.
   """
-  # --- 2nd IMPROVEMENT: SMART CLIP PADDING ---
-  # Add a 2-second buffer before and after the match
-  # max(0.0, ...) ensures the start time never goes below 0 seconds
   buffered_start = max(0.0, start_time - 2.0)
   buffered_end = end_time + 2.0
-  # -------------------------------------------
 
-  # Locate source video file in the data folder
+  # Fetch the exact source file path from ChromaDB metadata
   source_path = None
-  for ext in [".mp4", ".mkv", ".mov"]:
-    candidate = os.path.join("./data", f"{video_id}{ext}")
-    if os.path.exists(candidate):
-      source_path = candidate
-      break
+  try:
+    client = get_chroma_client()
+    audio_col = get_audio_collection(client)
+    # Look up any chunk matching this video_id to get its file_path
+    results = audio_col.get(where={"video_id": video_id}, limit=1)
+    if results and results.get("metadatas") and len(results["metadatas"]) > 0:
+      source_path = results["metadatas"][0].get("file_path")
 
-  if not source_path:
-    return ""  # Source video file not found locally
+    # Fallback to visual collection if audio didn't have it
+    if not source_path:
+      visual_col = get_visual_collection(client)
+      v_results = visual_col.get(where={"video_id": video_id}, limit=1)
+      if (
+          v_results
+          and v_results.get("metadatas")
+          and len(v_results["metadatas"]) > 0
+      ):
+        source_path = v_results["metadatas"][0].get("file_path")
+  except Exception as e:
+    logger.error("Failed to query file path from ChromaDB: %s", str(e))
+
+  # Final fallback check if path from DB doesn't exist
+  if not source_path or not os.path.exists(source_path):
+    # Try the old fallback method just in case
+    for ext in [".mp4", ".mkv", ".mov"]:
+      candidate = os.path.join("./data", f"{video_id}{ext}")
+      if os.path.exists(candidate):
+        source_path = candidate
+        break
+
+  if not source_path or not os.path.exists(source_path):
+    logger.warning("Source video for ID %s was not found on disk.", video_id)
+    return ""
 
   output_clip_name = f"{video_id}_clip_{int(buffered_start)}_{int(buffered_end)}.mp4"
   output_path = os.path.join("./data", output_clip_name)
 
-  # FFmpeg command using the buffered start and end times
   command = [
       "ffmpeg",
       "-y",
@@ -135,15 +169,25 @@ def slice_video_segment(video_id: str, start_time: float, end_time: float) -> st
     )
     return output_path
   except subprocess.CalledProcessError:
+    logger.exception("FFmpeg failed while creating a clip for %s.", video_id)
     return ""
+
+AGENT_SYSTEM_PROMPT = """
+You are a strict, precise video search validation agent. Your job is to verify whether search results genuinely match the user's query.
+
+CRITICAL RULES:
+1. NEVER force a match. If the search results do not clearly and directly contain the requested content, you MUST set `found_match` to `false`.
+2. IGNORE audio chunks for visual queries (clothing, colors, physical appearance, visual actions) unless the visual frames explicitly confirm a match.
+3. If you catch yourself writing phrases like "it is not a perfect match" or "it is the best match available", THAT IS A FAILURE. Set `found_match` to `false`.
+4. When `found_match` is true, you MUST extract the exact Video ID (e.g., vid_119c6162f1bb) from the search tool output and put it into the `video_id` field.
+5. If `found_match` is false, leave `video_id`, `start_time`, `end_time` empty/zero, and explain why in `reasoning`.
+"""
 
 # 3. LangGraph Nodes
 async def call_model(state: MessagesState):
   system_prompt = SystemMessage(
       content=(
-          "You are an advanced agentic video search assistant. Use the"
-          " search_video_database tool to find exact matching timestamps for"
-          " the user request."
+          AGENT_SYSTEM_PROMPT
       )
   )
   response = await llm_with_tools.ainvoke([system_prompt] + state["messages"])
@@ -207,4 +251,5 @@ async def query_video_agent_programmatic(query_text: str) -> VideoSearchResponse
     )
     result.clip_path = clip_file_path
 
+  logger.info("Video agent query completed for video ID %s.", result.video_id)
   return result

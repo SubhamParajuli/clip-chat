@@ -18,6 +18,7 @@ dependencies = [
     "opencv-python>=4.8.0",
     "pydantic>=2.0.0",
     "sentence-transformers>=3.0.0",
+    "streamlit>=1.65.0",
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     "uvicorn>=0.54.0",

@@ -3,6 +3,9 @@ import os
 import re
 from langchain_core.messages import HumanMessage
 from src.agent import async_app
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def extract_timestamp_from_text(text: str) -> float | None:
@@ -15,7 +18,7 @@ def extract_timestamp_from_text(text: str) -> float | None:
 
 def run_evaluation(dataset_path: str = "eval_dataset.json", time_tolerance: float = 5.0):
   if not os.path.exists(dataset_path):
-    print(f"Error: Evaluation dataset '{dataset_path}' not found.")
+    logger.error("Evaluation dataset '%s' not found.", dataset_path)
     return
 
   with open(dataset_path, "r") as f:
@@ -40,6 +43,7 @@ def run_evaluation(dataset_path: str = "eval_dataset.json", time_tolerance: floa
       final_state = async_app.invoke(inputs)
       agent_response = final_state["messages"][-1].content
     except Exception as e:
+      logger.exception("Evaluation agent execution failed for test %d.", i)
       print(f"  [FAIL] Agent execution error: {str(e)}")
       continue
 

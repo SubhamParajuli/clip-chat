@@ -1,7 +1,6 @@
 import chromadb
 from chromadb.config import Settings
 
-
 def get_chroma_client():
   # Local persistent client
   return chromadb.PersistentClient(path="data/chroma_db")
