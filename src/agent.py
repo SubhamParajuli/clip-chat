@@ -1,3 +1,6 @@
+import os 
+import subprocess
+from yt_dlp import YoutubeDL
 from langchain_core.messages import SystemMessage
 from langchain.agents import create_agent
 from langchain_core.tools import tool
@@ -11,6 +14,66 @@ from src.db_client import get_chroma_client,get_video_collection
 text_embedder=SentenceTransformer("all-MiniLM-L6-v2")
 clip_model=SentenceTransformer("clip-ViT-B-32")
 collection=get_video_collection(get_chroma_client())
+
+@tool
+def download_youtube_video(url: str) -> str:
+  """Downloads a YouTube video to the local data directory using its URL and returns the file path."""
+  output_dir = "./data"
+  os.makedirs(output_dir, exist_ok=True)
+
+  ydl_opts = {
+      "format": "best[ext=mp4]/best",
+      "outtmpl": os.path.join(output_dir, "%(id)s.%(ext)s"),
+      "quiet": True,
+  }
+
+  try:
+    with YoutubeDL(ydl_opts) as ydl:
+      info = ydl.extract_info(url, download=True)
+      filename = ydl.prepare_filename(info)
+      return (
+          f"Successfully downloaded video. File path: {filename} | Video ID:"
+          f" {info.get('id')}"
+      )
+  except Exception as e:
+    return f"Failed to download video: {str(e)}"
+
+@tool
+def cut_video_clip(
+    video_path: str, start_time: float, end_time: float, output_name: str = "clip.mp4"
+) -> str:
+  """Cuts a specific segment from a video file using start and end timestamps (in seconds) and saves it."""
+  output_path = os.path.join("./data", output_name)
+
+  # Construct FFmpeg command for fast, precise trimming
+  # -ss: start time, -to: end time, -c copy: fast stream copy without re-encoding
+  command = [
+      "ffmpeg",
+      "-y",
+      "-ss",
+      str(start_time),
+      "-to",
+      str(end_time),
+      "-i",
+      video_path,
+      "-c",
+      "copy",
+      output_path,
+  ]
+
+  try:
+    subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    return (
+        f"Successfully clipped video from {start_time}s to {end_time}s. Saved"
+        f" to: {output_path}"
+    )
+  except subprocess.CalledProcessError as e:
+    return f"Failed to cut video clip: {e.stderr.decode()}"
 
 @tool
 def search_video_database(query:str)->str:
