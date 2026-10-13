@@ -8,7 +8,7 @@ st.set_page_config(
     page_title="Multi-Modal Video Search Agent", layout="centered"
 )
 
-st.title("Local AI Multi-Modal Video Search Agent")
+st.title("Clip-Search : Multi-Modal Video Search Agent")
 st.markdown(
     "Search your video library using natural language, powered by LangGraph, "
     "ChromaDB, Whisper, and CLIP."

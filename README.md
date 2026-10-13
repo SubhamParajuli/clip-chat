@@ -1,4 +1,4 @@
-# Multi-Modal Video Search Agent
+# CLIP-SEARCH : Multi-Modal Video Search Agent
 
 Search a local video library with ordinary language and receive a playable clip
 from the matching moment. The project indexes **what is said**, **what appears
