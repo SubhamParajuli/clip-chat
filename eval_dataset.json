@@ -1,14 +1,14 @@
 [
   {
     "query": "when does the speaker talk about cross attention",
-    "expected_video_id": "eMlx5fFNoYc.mp4", 
-    "expected_start": 18.30,
+    "expected_video_id": "yt_eMlx5fFNoYc", 
+    "expected_start": 1100,
     "should_exist": true
   },
   {
     "query": "when does lecturer shows and teach about context size.",
-    "expected_video_id": "eMlx5fFNoYc.mp4",
-    "expected_start": 12.4,
+    "expected_video_id": "yt_eMlx5fFNoYc",
+    "expected_start": 747,
     "should_exist": true
   },
     {
@@ -16,5 +16,24 @@
     "expected_video_id": "",
     "expected_start": "",
     "should_exist": false
+  },
+      {
+    "query": "when does the person start doing plank.",
+    "expected_video_id": "yt_4q2pqdEnbos",
+    "expected_start": 660,
+    "should_exist": false
+  },
+    {
+    "query": "when does the person start doing pushups.",
+    "expected_video_id": "",
+    "expected_start": "",
+    "should_exist": false
+  },
+      {
+    "query": "when do we spot blue car.",
+    "expected_video_id": "yt_eO19UTm93GQ",
+    "expected_start": 38,
+    "should_exist": true
   }
+
 ]
